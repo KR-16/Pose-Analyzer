@@ -3,6 +3,7 @@ from PyQt5.QtWidgets import (QMainWindow, QVBoxLayout, QWidget,
 from PyQt5.QtCore import Qt, QTimer
 import cv2
 from PyQt5.QtGui import QImage, QPixmap
+from config import ExerciseType
 
 class MainWindow(QMainWindow):
     def __init__(self, tracker, visualizer, workout_manager, voice_feedback):

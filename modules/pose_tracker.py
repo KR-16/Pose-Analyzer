@@ -1,6 +1,8 @@
 import mediapipe as mp
 import numpy as np
-from ..config import MEDIAPIPE_CONFIG, EXERCISE_CONFIG, ExerciseType
+from config import MEDIAPIPE_CONFIG, EXERCISE_CONFIG, ExerciseType
+import cv2
+
 
 class PoseTracker:
     def __init__(self):
