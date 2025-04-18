@@ -5,9 +5,15 @@ import time
 from enum import Enum
 import json
 from datetime import datetime
-import pyttsx3  # Text-to-speech library
+import pyttsx3
 import threading
 import queue
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.animation import FuncAnimation
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+import sys
 
 class ExerciseType(Enum):
     SQUAT = 1
@@ -19,7 +25,7 @@ class ExerciseType(Enum):
 class VoiceFeedback:
     def __init__(self):
         self.engine = pyttsx3.init()
-        self.engine.setProperty('rate', 150)  # Slower speech rate
+        self.engine.setProperty('rate', 150)
         self.engine.setProperty('volume', 1.0)
         self.message_queue = queue.Queue()
         self.running = True
@@ -38,7 +44,6 @@ class VoiceFeedback:
     
     def speak(self, message, priority=False):
         if priority:
-            # Clear queue for important messages
             with self.message_queue.mutex:
                 self.message_queue.queue.clear()
         self.message_queue.put(message)
@@ -47,9 +52,94 @@ class VoiceFeedback:
         self.running = False
         self.thread.join()
 
-class PoseTracker:
+class PoseTracker3DVisualizer:
     def __init__(self):
-        # Initialize MediaPipe
+        self.fig = plt.figure(figsize=(10, 8))
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.ax.set_xlim3d(-1, 1)
+        self.ax.set_ylim3d(-1, 1)
+        self.ax.set_zlim3d(-1, 1)
+        self.ax.set_xlabel('X')
+        self.ax.set_ylabel('Y')
+        self.ax.set_zlabel('Z')
+        self.ax.set_title('3D Motion Visualization')
+        
+        # Initialize skeleton lines
+        self.lines = []
+        self.points = []
+        
+        # Set viewing angle
+        self.ax.view_init(elev=20, azim=45)
+        
+        # Store previous frame data
+        self.prev_landmarks = None
+    
+    def update_plot(self, landmarks):
+        if landmarks is None:
+            return
+        
+        # Clear previous frame
+        for line in self.lines:
+            line.remove()
+        for point in self.points:
+            point.remove()
+        self.lines = []
+        self.points = []
+        
+        # Convert landmarks to 3D coordinates
+        x_coords = []
+        y_coords = []
+        z_coords = []
+        
+        for landmark in landmarks:
+            x_coords.append(landmark.x)
+            y_coords.append(landmark.y)
+            z_coords.append(-landmark.z)  # Invert Z for more intuitive view
+        
+        # Plot joints
+        self.points = self.ax.scatter(
+            x_coords, y_coords, z_coords, 
+            c='red', marker='o', s=20
+        )
+        
+        # Draw skeleton connections
+        connections = mp.solutions.pose.POSE_CONNECTIONS
+        for connection in connections:
+            start_idx = connection[0]
+            end_idx = connection[1]
+            
+            line = self.ax.plot(
+                [x_coords[start_idx], x_coords[end_idx]],
+                [y_coords[start_idx], y_coords[end_idx]],
+                [z_coords[start_idx], z_coords[end_idx]],
+                'b-', linewidth=2
+            )
+            self.lines.extend(line)
+        
+        # Store current frame data for smooth transitions
+        self.prev_landmarks = landmarks
+        
+        # Redraw
+        plt.draw()
+        plt.pause(0.001)
+
+class PoseTrackerApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("AI Gym Trainer with 3D Visualization")
+        self.setGeometry(100, 100, 1200, 800)
+        
+        # Initialize components
+        self.init_pose_tracker()
+        self.init_voice_feedback()
+        self.init_ui()
+        
+        # Start camera thread
+        self.camera_thread = threading.Thread(target=self.process_camera)
+        self.camera_thread.daemon = True
+        self.camera_thread.start()
+    
+    def init_pose_tracker(self):
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
@@ -58,16 +148,13 @@ class PoseTracker:
             model_complexity=2
         )
         
-        # Voice feedback system
-        self.voice = VoiceFeedback()
-        
         # Exercise configuration
         self.exercise_config = {
             ExerciseType.SQUAT: {
                 'name': 'Squat',
                 'form_rules': self.check_squat_form,
                 'rep_phase_detection': self.detect_squat_phase,
-                'ideal_tempo': (3, 0, 1, 1),  # eccentric, bottom, concentric, top
+                'ideal_tempo': (3, 0, 1, 1),
                 'voice_cues': {
                     'depth_ok': "Good depth",
                     'depth_low': "Go deeper",
@@ -90,7 +177,7 @@ class PoseTracker:
             }
         }
         
-        # Workout tracking
+        # Tracking variables
         self.current_exercise = None
         self.rep_count = 0
         self.set_count = 1
@@ -104,12 +191,34 @@ class PoseTracker:
         self.feedback_messages = []
         self.performance_stats = {}
         self.last_feedback_time = 0
-        self.feedback_cooldown = 2  # seconds
+        self.feedback_cooldown = 2
         
         # Camera setup
         self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        # 3D Visualizer
+        self.visualizer_3d = PoseTracker3DVisualizer()
+        
+        # Current frame storage
+        self.current_frame = None
+        self.current_landmarks = None
+        self.frame_lock = threading.Lock()
+    
+    def init_voice_feedback(self):
+        self.voice = VoiceFeedback()
+    
+    def init_ui(self):
+        main_widget = QWidget()
+        layout = QVBoxLayout()
+        
+        # Create matplotlib canvas
+        self.canvas = FigureCanvas(self.visualizer_3d.fig)
+        layout.addWidget(self.canvas)
+        
+        main_widget.setLayout(layout)
+        self.setCentralWidget(main_widget)
     
     def load_history(self):
         try:
@@ -143,13 +252,11 @@ class PoseTracker:
         left_ankle = landmarks[self.mp_pose.PoseLandmark.LEFT_ANKLE]
         left_shoulder = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
         
-        # Knee alignment check
         knee_ankle_angle = self.calculate_angle(left_hip, left_knee, left_ankle)
         if knee_ankle_angle < 160:
             feedback.append("Knees too far forward")
             voice_feedback.append(('knees_forward', True))
         
-        # Depth check
         hip_knee_diff = abs(left_hip.y - left_knee.y)
         if hip_knee_diff < 0.15:
             feedback.append("Good depth")
@@ -158,23 +265,21 @@ class PoseTracker:
             feedback.append("Aim for deeper squat")
             voice_feedback.append(('depth_low', True))
         
-        # Torso position
         shoulder_hip_angle = self.calculate_angle(left_shoulder, left_hip, left_knee)
         if shoulder_hip_angle < 160:
             feedback.append("Keep chest up")
             voice_feedback.append(('chest_up', True))
         
-        # Process voice feedback
         current_time = time.time()
         if current_time - self.last_feedback_time > self.feedback_cooldown:
             for cue, important in voice_feedback:
-                if important or np.random.random() < 0.3:  # 30% chance for non-critical feedback
+                if important or np.random.random() < 0.3:
                     self.voice.speak(
                         self.exercise_config[self.current_exercise]['voice_cues'][cue],
                         priority=important
                     )
                     self.last_feedback_time = current_time
-                    break  # Only say one thing at a time
+                    break
         
         return feedback
     
@@ -188,25 +293,21 @@ class PoseTracker:
         left_hip = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP]
         left_wrist = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST]
         
-        # Body alignment
         shoulder_hip_angle = self.calculate_angle(left_shoulder, left_hip, left_wrist)
         if shoulder_hip_angle < 170:
             feedback.append("Keep body straight")
             voice_feedback.append(('body_straight', True))
         
-        # Elbow position
         elbow_angle = self.calculate_angle(left_shoulder, left_elbow, left_wrist)
         if not (45 <= elbow_angle <= 60):
             feedback.append("Elbows at 45 degrees")
             voice_feedback.append(('elbows_45', True))
         
-        # Range of motion
         shoulder_wrist_diff = abs(left_shoulder.y - left_wrist.y)
         if shoulder_wrist_diff < 0.1:
             feedback.append("Go deeper")
             voice_feedback.append(('full_range', True))
         
-        # Process voice feedback
         current_time = time.time()
         if current_time - self.last_feedback_time > self.feedback_cooldown:
             for cue, important in voice_feedback:
@@ -257,19 +358,15 @@ class PoseTracker:
                 phase_duration = time.time() - self.last_phase_change
                 self.phase_times.append((self.current_phase, phase_duration))
             
-            # Check for completed rep
             if (self.current_phase == "bottom" and new_phase == "concentric") or \
                (self.current_phase == "top" and new_phase == "eccentric"):
                 self.rep_count += 1
                 self.feedback_messages.append(f"Rep {self.rep_count} completed!")
-                
-                # Voice feedback for completed rep
                 self.voice.speak(
                     self.exercise_config[self.current_exercise]['voice_cues']['rep_complete'],
                     priority=False
                 )
                 
-                # Calculate tempo metrics
                 if len(self.phase_times) >= 3:
                     eccentric_time = sum(t for p, t in self.phase_times if p == "eccentric")
                     concentric_time = sum(t for p, t in self.phase_times if p == "concentric")
@@ -283,59 +380,51 @@ class PoseTracker:
             self.current_phase = new_phase
             self.last_phase_change = time.time()
     
-    def process_frame(self):
-        success, frame = self.cap.read()
-        if not success:
-            return None
-        
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image.flags.writeable = False
-        results = self.pose.process(image)
-        
-        image.flags.writeable = True
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        
-        if results.pose_landmarks:
-            landmarks = results.pose_landmarks.landmark
+    def process_camera(self):
+        while self.cap.isOpened():
+            success, frame = self.cap.read()
+            if not success:
+                continue
             
-            if self.current_exercise:
-                config = self.exercise_config[self.current_exercise]
-                
-                form_feedback = config['form_rules'](landmarks)
-                self.feedback_messages.extend(form_feedback)
-                
-                new_phase = config['rep_phase_detection'](landmarks)
-                self.track_reps(new_phase)
-                
-                if self.current_exercise == ExerciseType.SQUAT:
-                    self.prev_hip_y = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP].y
-                elif self.current_exercise == ExerciseType.PUSHUP:
-                    self.prev_wrist_y = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST].y
+            image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image.flags.writeable = False
+            results = self.pose.process(image)
             
-            self.mp_drawing.draw_landmarks(
-                image, results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS,
-                self.mp_drawing.DrawingSpec(color=(245, 117, 66)), 
-                self.mp_drawing.DrawingSpec(color=(245, 66, 230)))
-        
-        return image
-    
-    def display_feedback(self, image):
-        if self.current_exercise:
-            cv2.putText(image, f"Exercise: {self.exercise_config[self.current_exercise]['name']}", 
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(image, f"Reps: {self.rep_count} | Set: {self.set_count}", 
-                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            if self.current_phase:
-                cv2.putText(image, f"Phase: {self.current_phase}", 
-                            (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        for i, message in enumerate(self.feedback_messages[-3:], 1):
-            cv2.putText(image, message, (10, 120 + 30 * i), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        self.feedback_messages = []
-        
-        return image
+            image.flags.writeable = True
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            
+            if results.pose_landmarks:
+                landmarks = results.pose_landmarks.landmark
+                
+                with self.frame_lock:
+                    self.current_frame = image
+                    self.current_landmarks = landmarks
+                
+                if self.current_exercise:
+                    config = self.exercise_config[self.current_exercise]
+                    
+                    form_feedback = config['form_rules'](landmarks)
+                    self.feedback_messages.extend(form_feedback)
+                    
+                    new_phase = config['rep_phase_detection'](landmarks)
+                    self.track_reps(new_phase)
+                    
+                    if self.current_exercise == ExerciseType.SQUAT:
+                        self.prev_hip_y = landmarks[self.mp_pose.PoseLandmark.LEFT_HIP].y
+                    elif self.current_exercise == ExerciseType.PUSHUP:
+                        self.prev_wrist_y = landmarks[self.mp_pose.PoseLandmark.LEFT_WRIST].y
+                
+                # Update 3D visualization
+                self.visualizer_3d.update_plot(landmarks)
+                
+                # Draw landmarks on 2D frame
+                self.mp_drawing.draw_landmarks(
+                    image, results.pose_landmarks, self.mp_pose.POSE_CONNECTIONS,
+                    self.mp_drawing.DrawingSpec(color=(245, 117, 66)), 
+                    self.mp_drawing.DrawingSpec(color=(245, 66, 230)))
+            
+            with self.frame_lock:
+                self.current_frame = image
     
     def start_workout(self, exercise_type):
         self.current_exercise = exercise_type
@@ -347,7 +436,6 @@ class PoseTracker:
         self.performance_stats = {}
         self.feedback_messages = []
         
-        # Initial voice instructions
         exercise_name = self.exercise_config[exercise_type]['name']
         self.voice.speak(f"Starting {exercise_name} workout. Let's begin!", priority=True)
     
@@ -363,7 +451,6 @@ class PoseTracker:
             self.workout_history.append(workout_data)
             self.save_history()
             
-            # Final voice summary
             self.voice.speak(
                 f"Workout complete. You did {self.rep_count} reps across {self.set_count} sets. Great job!",
                 priority=True
@@ -371,41 +458,29 @@ class PoseTracker:
             
             self.current_exercise = None
     
-    def run(self):
-        print("Real-Time Exercise Tracker with Voice Feedback")
-        print("Available exercises:")
-        for ex in ExerciseType:
-            print(f"{ex.value}. {ex.name}")
-        
-        exercise_choice = int(input("Select exercise (1-5): "))
-        self.start_workout(ExerciseType(exercise_choice))
-        
-        try:
-            while self.cap.isOpened():
-                processed_frame = self.process_frame()
-                if processed_frame is None:
-                    break
-                
-                display_frame = self.display_feedback(processed_frame)
-                cv2.imshow('Exercise Tracker', display_frame)
-                
-                key = cv2.waitKey(10)
-                if key == ord('q'):
-                    self.end_workout()
-                    break
-                elif key == ord('n'):
-                    self.set_count += 1
-                    self.rep_count = 0
-                    self.voice.speak(f"Starting set {self.set_count}", priority=True)
-                elif key == ord(' '):
-                    # Manual feedback trigger
-                    self.last_feedback_time = 0  # Reset cooldown
-        
-        finally:
-            self.cap.release()
-            cv2.destroyAllWindows()
-            self.voice.stop()
+    def closeEvent(self, event):
+        self.end_workout()
+        self.cap.release()
+        self.voice.stop()
+        event.accept()
+
+def main():
+    app = QApplication(sys.argv)
+    
+    # Exercise selection dialog
+    print("Real-Time Exercise Tracker with 3D Visualization")
+    print("Available exercises:")
+    for ex in ExerciseType:
+        print(f"{ex.value}. {ex.name}")
+    
+    exercise_choice = int(input("Select exercise (1-5): "))
+    
+    # Create and show main window
+    window = PoseTrackerApp()
+    window.show()
+    window.start_workout(ExerciseType(exercise_choice))
+    
+    sys.exit(app.exec_())
 
 if __name__ == "__main__":
-    tracker = PoseTracker()
-    tracker.run()
+    main()
